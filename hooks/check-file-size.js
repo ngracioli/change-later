@@ -48,7 +48,7 @@ process.stdin.on("end", () => {
   // summarized it — serve the summary directly, no delegation, no model call.
   const cached = readSummary(filePath, stat);
   if (cached) {
-    const additionalContext =
+    const summary =
       cached.length > MAX_ADDITIONAL_CONTEXT
         ? `${cached.slice(0, MAX_ADDITIONAL_CONTEXT)}\n\n[cached summary truncated — file unchanged since last bulk-reader pass, but summary exceeds the ${MAX_ADDITIONAL_CONTEXT}-char inline budget]`
         : cached;
@@ -56,9 +56,8 @@ process.stdin.on("end", () => {
       JSON.stringify({
         hookSpecificOutput: {
           hookEventName: "PreToolUse",
-          permissionDecision: "allow",
-          permissionDecisionReason: "Served from bulk-reader disk cache (file unchanged since last summary).",
-          additionalContext,
+          permissionDecision: "deny",
+          permissionDecisionReason: `Do not read this file — it hasn't changed since the last bulk-reader pass. Here is the cached summary:\n\n${summary}`,
         },
       })
     );
