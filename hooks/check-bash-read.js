@@ -15,8 +15,9 @@ process.stdin.on("end", () => {
     process.exit(0);
   }
 
-  // PreToolUse fires for subagent tool calls too — exempt bulk-reader itself (see check-file-size.js).
-  if (payload?.agent_type === "bulk-reader") process.exit(0);
+  // PreToolUse fires for subagent tool calls too — exempt bulk-reader itself.
+  // agent_type is plugin-prefixed ("<plugin-name>:bulk-reader"), see check-file-size.js.
+  if (payload?.agent_type?.split(":").pop() === "bulk-reader") process.exit(0);
 
   const command = payload?.tool_input?.command;
   if (!command) process.exit(0);

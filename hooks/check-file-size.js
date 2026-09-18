@@ -17,7 +17,9 @@ process.stdin.on("end", () => {
 
   // PreToolUse fires for subagent tool calls too. Without this, bulk-reader's own
   // Read on the file it was dispatched to read gets denied by itself — a deny loop.
-  if (payload?.agent_type === "bulk-reader") process.exit(0);
+  // agent_type is plugin-prefixed ("<plugin-name>:bulk-reader"), confirmed empirically
+  // by dumping the real hook payload — doc-derived "bulk-reader" exact match doesn't fire.
+  if (payload?.agent_type?.split(":").pop() === "bulk-reader") process.exit(0);
 
   const filePath = payload?.tool_input?.file_path;
   if (!filePath) process.exit(0);
@@ -27,6 +29,11 @@ process.stdin.on("end", () => {
   if (Number.isFinite(requestedLimit) && requestedLimit > 0 && requestedLimit <= LINE_LIMIT) {
     process.exit(0);
   }
+
+  // Explicit offset means the caller already knows where to look (e.g. after a bulk-reader
+  // summary, or during an edit) — that's a targeted read, not a bulk one. Let it through
+  // regardless of size, even if the requested limit is still above LINE_LIMIT.
+  if ("offset" in (payload?.tool_input ?? {})) process.exit(0);
 
   let stat;
   try {
