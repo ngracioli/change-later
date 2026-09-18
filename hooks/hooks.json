@@ -38,6 +38,18 @@
           }
         ]
       }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/subagent-stop.js"],
+            "statusMessage": "Caching bulk-reader summary..."
+          }
+        ]
+      }
     ]
   }
 }

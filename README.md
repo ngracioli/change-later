@@ -15,11 +15,32 @@ When the agent reads a large file, the raw content enters context and burns thou
 
 Three layers on top of Claude Code's native features:
 
-1. **Hooks** (`PreToolUse`) — intercept before it costs anything. `Read` is a hard gate: line-count OR byte-size over threshold denies, regardless of the model. A small paginated `Read` (offset/limit at or under the threshold) is let through — it's already cheap. `cat`/`head`/`tail` in `Bash` is a *speed bump*, not a hard gate — see Design decisions.
-2. **Subagent worker** (`model: haiku`) — reads in its own isolated context and returns only the summary. Runs under Claude Code's own auth, no key.
+1. **Hooks** (`PreToolUse`) — intercept before it costs anything. `Read` is a hard gate: line-count OR byte-size over threshold denies, regardless of the model, *unless* a valid disk-cache entry exists for that exact file state (see Disk cache below) — a hit is served inline, no denial, no delegation. A small paginated `Read` (offset/limit at or under the threshold) is let through — it's already cheap. `cat`/`head`/`tail` in `Bash` is a *speed bump*, not a hard gate — see Design decisions.
+2. **Subagent worker** (`model: haiku`) — reads in its own isolated context and returns only the summary. Runs under Claude Code's own auth, no key. Its summary is cached to disk on completion (`SubagentStop`).
 3. **Skill / description** — makes the model delegate early, as the first option.
 
 Validated in a real test (guard.ts, 1335 lines): the hook blocked, Claude delegated on the first try, and the summary came back useful, without the raw file touching main context.
+
+## Parallel dispatch
+
+Spotify's shunt runs the Portal CLI in a blocking Bash call — 10–30s
+per delegation, and mapping N large files costs N × that, serialized.
+
+Native subagents fix this differently: in an **interactive session**,
+subagent dispatch runs in background by default (fork mode) — the same
+per-file latency stops blocking the session, and multiple `bulk-reader`
+Task calls in one turn run concurrently (cap: 20 concurrent subagents per
+session), so mapping 5 large files costs one delegation's wall time, not
+five. `skills/delegation/SKILL.md` tells the main model to dispatch one
+worker per file in a single turn instead of looping sequentially, and each
+worker's summary opens with the file path it read so N concurrent results
+don't come back indistinguishable.
+
+**Caveat:** this depends on fork mode being on, which is an interactive-session
+default. In **non-interactive `-p` mode and the Agent SDK, fork mode is off
+by default** — subagent calls there block sequentially, so parallel
+dispatch still saves tokens (Haiku, isolated context) but not wall-clock
+time, same as Spotify's shunt.
 
 ## Multi-agent organization
 
@@ -34,10 +55,12 @@ context-offload/
 │   └── bulk-reader.md            #   worker (model:haiku, read-only)
 ├── skills/                       # SHARED: skills
 │   └── delegation/SKILL.md       #   when to delegate
-├── hooks/                        # Claude-specific (PreToolUse contract)
+├── hooks/                        # Claude-specific (PreToolUse/SubagentStop contract)
 │   ├── hooks.json
-│   ├── check-file-size.js        #   gate for Read (cross-platform, Node)
-│   └── check-bash-read.js        #   gate for cat/head/tail via Bash
+│   ├── check-file-size.js        #   gate for Read (cross-platform, Node), cache lookup
+│   ├── check-bash-read.js        #   gate for cat/head/tail via Bash
+│   ├── subagent-stop.js          #   writes bulk-reader's summary to the disk cache
+│   └── lib/cache.js              #   shared disk-cache read/write
 ├── evals/                        # claude plugin eval suite (see Eval suite)
 ├── .github/workflows/ci.yml      # validate + eval, gates PRs
 ├── docs/
@@ -54,6 +77,9 @@ Only the **hook** is tightly bound to Claude Code (`PreToolUse` contract). Subag
 
 ## Design decisions
 
+- **LSP checked before delegation when available.** `skills/delegation/SKILL.md` prefers the LSP tool (go-to-definition, find references, document symbols) over spawning `bulk-reader` when the question is about definitions/references/types/symbols rather than prose or logic — zero content loaded into context, millisecond latency vs 10-30s for a subagent. Requires a code-intelligence plugin installed for the language (official ones: `pyright-lsp`, `typescript-lsp`, `rust-analyzer-lsp`); doesn't run in cloud sessions. Falls back to delegation automatically and silently when unavailable.
+- **Delegation is the first half of a read-then-edit flow, not a dead end — this is what resolves the read-before-edit tension.** `Edit` requires Claude Code to have read the target file in-conversation, and a gate-denied attempt (the `PARTIAL view` warning on a bulk `Read`) doesn't count as having read it. Jumping straight from a `bulk-reader` summary to `Edit` hits that same wall. The fix: `bulk-reader`'s contract requires every `Structure`/`Answer` entry to carry a full `start-end` line range, never a bare start line (`agents/bulk-reader.md`) — the natural next step is a `Read` with `offset`/`limit` set to that exact range, kept at or under the size threshold, which the gate already lets through (see "Explicit `offset` bypasses the size gate" below) without denial or re-delegation. `skills/delegation/SKILL.md` spells out this second step explicitly, so delegation isn't terminal: question → delegate → paginated `Read` on the returned range → `Edit`, all without the full file ever entering context. Verified end-to-end: a synthetic 601-line file gets denied on a bare `Read`, then allowed silently on `Read(offset: 42, limit: 77)` matching a returned range.
+- **Worker reused across follow-ups on the same file, not respawned.** Spotify's shunt re-sends the whole file to the cheap model on every follow-up question — its stated limitation. Here, a `bulk-reader` that already read a file can be resumed with `SendMessage` (agent ID/name), keeping full history; the resumed run still reads from the prompt cache the first run warmed. First question pays for the read, later ones on that file are near-cache-hit, at zero raw-content cost to the main context. `skills/delegation/SKILL.md` tells the main model to check for a matching worker before spawning a new one — instruction, not a hook-enforced gate. `experimental.cacheTtl: "1h"` on the worker (requires Claude Code ≥ 2.1.248) keeps that cache warm long enough to matter across a multi-turn task.
 - **Worker = native Haiku subagent.** No key, no external service, within ToS. Isolated context is native.
 - **Haiku scoped to the worker.** Doesn't force a model for the rest of the session.
 - **`omitClaudeMd: true` on the worker.** The whole point is a disposable context — no reason to also load the CLAUDE.md hierarchy and git status into it. Requires Claude Code ≥ 2.1.271. **Minimum supported Claude Code version: 2.1.271** (also required by the hook contract choices above; developed/tested on 2.1.277).
@@ -66,6 +92,57 @@ Only the **hook** is tightly bound to Claude Code (`PreToolUse` contract). Subag
 - **Bash gate uses `if` matchers, not a blanket `Bash` spawn.** Three hook entries, one per command (`Bash(cat *)`, `Bash(head *)`, `Bash(tail *)`), so a non-matching Bash call (`ls`, `grep`, ...) never spawns Node at all — confirmed in `--debug` output ("Skipping hook due to if condition ... not matching"). Matches the speed-bump framing: filter cheaply, don't run a process per Bash call.
 - **Hook commands use exec form** (`command`/`args` array, not a single shell-tokenized string) plus `statusMessage` — avoids Windows quoting/tokenization issues.
 - **Honest numbers.** Measure your own setup's real savings before claiming any percentage (a lesson straight from caveman).
+
+### Disk cache
+
+The gate now memoizes bulk-reader's summaries to disk, so a repeat question about
+a file that hasn't changed since the last summary skips delegation entirely —
+served in milliseconds, no worker spawn, no model call.
+
+- **Storage: `${CLAUDE_PLUGIN_DATA}`, not `${CLAUDE_PLUGIN_ROOT}`.** `CLAUDE_PLUGIN_ROOT`
+  points at the installed plugin's own code directory, which is replaced wholesale
+  on every update — anything written there is gone on the next `claude plugin update`.
+  `CLAUDE_PLUGIN_DATA` is the plugin's persistent data directory, survives updates,
+  and is the correct place for anything the plugin generates at runtime rather than
+  ships with.
+- **Key: `sha256(absolute path + mtimeMs + size)`.** `check-file-size.js` already
+  calls `statSync` on the byte-size fast path, so reusing that same stat for the
+  cache lookup is near-zero marginal cost — no extra syscall on the hot path.
+- **Invalidation: mtime+size, not a content hash.** A content hash is stronger
+  (catches a same-size same-mtime edit, which mtime+size can't) but requires
+  reading the whole file to invalidate the cache — exactly the I/O this cache
+  exists to avoid paying on every gate check. mtime+size is what the OS already
+  tracks for free via `stat`, and it's the same signal build tools (`make`, most
+  bundlers) trust for "did this file change" — good enough here, and the failure
+  mode (a same-size edit within the same filesystem-timestamp tick) is rare
+  enough not to justify reading every large file on every check just to rule it
+  out. If that gap ever matters, the fix is a content hash gated *behind* the
+  mtime+size check (only hash on a size/mtime match), not instead of it.
+- **Cache entries never expire on their own.** There's no TTL — a hit is valid
+  for as long as mtime+size hasn't changed, which is the correctness condition
+  the cache actually cares about. Nothing currently prunes stale entries for
+  files that get deleted or renamed; they just sit unused in
+  `${CLAUDE_PLUGIN_DATA}/bulk-reader-cache/`. Acceptable for a POC — one JSON
+  file per unique (path, mtime, size) tuple, and the whole directory can be
+  wiped safely at any time (it's a cache, not state).
+- **Write path: `SubagentStop` matched on `agent_type`.** Same plugin-prefix
+  gotcha as the `Read`/`Bash` gates (`"context-offload:bulk-reader"`, not
+  `"bulk-reader"`) — filtered in-script rather than via the hook's `matcher`,
+  for the same reason: matching a prefixed field with a plain-string matcher is
+  unreliable, so every hook here does the agent-type check as its first line
+  instead. The hook reads `last_assistant_message` straight off the
+  `SubagentStop` payload for the summary text (no transcript parsing needed for
+  that part) and finds the target file by scanning `agent_transcript_path` for
+  bulk-reader's own first `Read` tool call — more reliable than trying to parse
+  a file path back out of free-form summary prose.
+- **`additionalContext` has a ~10,000-char budget.** Past that, Claude Code
+  saves the text to a file and only passes back a path + preview to the model —
+  which would silently defeat a cache hit's whole purpose (the point is the
+  full summary reaching the model inline, not a preview snippet). The hook
+  caps what it emits at 9,500 chars and appends a note if a cached summary is
+  longer, rather than relying on undocumented host-side truncation behavior.
+  In practice this shouldn't fire often: bulk-reader's contract is a compact
+  structured summary, not raw code.
 
 ## Eval suite
 

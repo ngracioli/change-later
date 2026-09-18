@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // PreToolUse gate for Read: blocks direct reads of large files, redirects to bulk-reader subagent.
 const fs = require("fs");
+const { readSummary, MAX_ADDITIONAL_CONTEXT } = require("./lib/cache");
 
 const LINE_LIMIT = 350;
 const BYTE_LIMIT = 40 * 1024; // catches minified/JSON/CSV files that are huge in bytes but short in lines
@@ -39,6 +40,27 @@ process.stdin.on("end", () => {
   try {
     stat = fs.statSync(filePath);
   } catch {
+    process.exit(0);
+  }
+
+  // Cache hit: the file hasn't changed (same mtime+size) since bulk-reader last
+  // summarized it — serve the summary directly, no delegation, no model call.
+  const cached = readSummary(filePath, stat);
+  if (cached) {
+    const additionalContext =
+      cached.length > MAX_ADDITIONAL_CONTEXT
+        ? `${cached.slice(0, MAX_ADDITIONAL_CONTEXT)}\n\n[cached summary truncated — file unchanged since last bulk-reader pass, but summary exceeds the ${MAX_ADDITIONAL_CONTEXT}-char inline budget]`
+        : cached;
+    console.log(
+      JSON.stringify({
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          permissionDecision: "allow",
+          permissionDecisionReason: "Served from bulk-reader disk cache (file unchanged since last summary).",
+          additionalContext,
+        },
+      })
+    );
     process.exit(0);
   }
 
