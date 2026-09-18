@@ -38,7 +38,8 @@ context-offload/
 │   ├── hooks.json
 │   ├── check-file-size.js        #   gate for Read (cross-platform, Node)
 │   └── check-bash-read.js        #   gate for cat/head/tail via Bash
-├── plugins/context-offload/      # packaged distribution (optional, via CI)
+├── evals/                        # claude plugin eval suite (see Eval suite)
+├── .github/workflows/ci.yml      # validate + eval, gates PRs
 ├── docs/
 │   └── HONEST-NUMBERS.md         #   real measurement of the savings
 └── README.md
@@ -66,6 +67,41 @@ Only the **hook** is tightly bound to Claude Code (`PreToolUse` contract). Subag
 - **Hook commands use exec form** (`command`/`args` array, not a single shell-tokenized string) plus `statusMessage` — avoids Windows quoting/tokenization issues.
 - **Honest numbers.** Measure your own setup's real savings before claiming any percentage (a lesson straight from caveman).
 
+## Eval suite
+
+`evals/` has 4 cases exercising the `Read` gate: `mass-read` (>350 lines,
+expects delegation), `paginated-read` (small offset/limit slice, expects
+direct read), `small-file` (<350 lines, expects direct read), and
+`minified-file` (1 line but ~47KB, expects delegation via the byte-size
+fast path). Each case seeds its own fixture with a `scaffold_script`
+(`context.scaffold_script` in `case.yaml`) — eval runs start in an empty,
+isolated workspace with no access to the repo, so the fixture has to be
+generated at run time, not checked in.
+
+```
+claude plugin eval . --trust-plugin --scaffold \
+  --json evals/results/run.json --threshold 0.8 \
+  --model claude-sonnet-5 --judge-model claude-haiku-4-5 --no-publish
+```
+
+`--scaffold` is required (off by default, since it runs author-supplied
+bash) — every case here needs it to create its fixture. `--trust-plugin`
+skips the interactive trust prompt (needed for CI / non-TTY).
+
+Check the plugin's always-on cost too — what it charges every session even
+when the gate never fires: `claude plugin details context-offload`.
+
+## CI
+
+`.github/workflows/ci.yml` runs on every push/PR to `main`:
+
+1. `claude plugin validate ./ --strict` — manifest/schema errors.
+2. `claude plugin eval . --trust-plugin --scaffold --threshold 0.8 --model claude-sonnet-5 --judge-model claude-haiku-4-5 --no-publish --max-cost-usd 20` — the eval suite above, gated at 0.8.
+
+Both the agent model and the judge model are pinned explicitly. Without
+that, a model rollout on Anthropic's side would look like a regression in
+this plugin instead of what it actually is.
+
 ## Install (Claude Code)
 
 ```
@@ -77,5 +113,6 @@ Restart Claude Code after installing — subagents and hooks are read at session
 
 ## Status
 
-✅ Proof of concept validated (hook + subagent + delegation working end to end).
-🚧 Packaging as a plugin in progress.
+✅ Proof of concept validated (hook + subagent + delegation working end to end, including the subagent deny-loop and paginated-edit paths — see Design decisions).
+✅ Eval suite (`evals/`) + CI gate wired up.
+❌ **No separate packaging step.** Caveman needs `plugins/<name>/` because its repo root holds more than one plugin's worth of stuff; this repo's root already *is* a valid plugin (`.claude-plugin/` + `agents/` + `skills/` + `hooks/` at the root, nothing else competing for that space), so `claude plugin marketplace add` + `claude plugin install` install directly from it. Decided, not pending.
