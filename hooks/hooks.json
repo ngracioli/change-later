@@ -6,7 +6,9 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node ${CLAUDE_PLUGIN_ROOT}/hooks/check-file-size.js"
+            "command": "node",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/check-file-size.js"],
+            "statusMessage": "Checking file size..."
           }
         ]
       },
@@ -15,7 +17,24 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node ${CLAUDE_PLUGIN_ROOT}/hooks/check-bash-read.js"
+            "if": "Bash(cat *)",
+            "command": "node",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/check-bash-read.js"],
+            "statusMessage": "Checking file size..."
+          },
+          {
+            "type": "command",
+            "if": "Bash(head *)",
+            "command": "node",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/check-bash-read.js"],
+            "statusMessage": "Checking file size..."
+          },
+          {
+            "type": "command",
+            "if": "Bash(tail *)",
+            "command": "node",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/check-bash-read.js"],
+            "statusMessage": "Checking file size..."
           }
         ]
       }
