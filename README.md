@@ -55,6 +55,7 @@ Only the **hook** is tightly bound to Claude Code (`PreToolUse` contract). Subag
 
 - **Worker = native Haiku subagent.** No key, no external service, within ToS. Isolated context is native.
 - **Haiku scoped to the worker.** Doesn't force a model for the rest of the session.
+- **`omitClaudeMd: true` on the worker.** The whole point is a disposable context — no reason to also load the CLAUDE.md hierarchy and git status into it. Requires Claude Code ≥ 2.1.271. **Minimum supported Claude Code version: 2.1.271** (also required by the hook contract choices above; developed/tested on 2.1.277).
 - **Hook in the plugin's `hooks/hooks.json`**, not in the subagent frontmatter — plugins ignore `hooks`/`mcpServers`/`permissionMode` in frontmatter.
 - **Hook in Node**, single file, cross-platform (Windows/Linux/Mac) — Claude Code already ships Node.
 - **`bulk-reader` is exempt from its own gate.** `PreToolUse` fires for subagent tool calls too, not just the main agent — without this, the worker's own `Read` on the file it was dispatched to read would deny itself (deny loop). Tested end-to-end with `--plugin-dir` + `--debug` against a real 1334-line file: the payload's `agent_type` is plugin-prefixed (`"context-offload:bulk-reader"`, not `"bulk-reader"`) — an exact-match check silently never fires. The check compares the last `:`-segment instead. Caught this by dumping the real hook payload, not from docs — worth remembering if the exemption ever needs touching again.

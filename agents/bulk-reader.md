@@ -8,6 +8,7 @@ description: >-
   with greps.
 model: haiku
 tools: Read, Grep, Glob
+omitClaudeMd: true
 ---
 
 You read a large file so the main agent doesn't have to.
