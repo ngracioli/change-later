@@ -1,0 +1,9 @@
+{
+  "name": "context-offload",
+  "version": "0.1.0",
+  "description": "Saves context by delegating large-file reads to a Haiku worker, no API key or external service.",
+  "author": {
+    "name": "ngracioli"
+  },
+  "hooks": "./hooks/hooks.json"
+}

@@ -1,0 +1,14 @@
+{
+  "name": "context-offload",
+  "description": "Saves context by delegating large-file reads to a Haiku worker, no API key or external service.",
+  "owner": {
+    "name": "ngracioli"
+  },
+  "plugins": [
+    {
+      "name": "context-offload",
+      "source": "./",
+      "description": "Saves context by delegating large-file reads to a Haiku worker."
+    }
+  ]
+}
